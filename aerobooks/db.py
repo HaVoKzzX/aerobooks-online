@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -346,11 +347,14 @@ def _ensure_dirs() -> None:
     DB_PATH = paths.db_path()
 
 
+@contextmanager
 def get_conn():
     _ensure_dirs()
     from aerobooks.store import encrypted_db
 
-    return encrypted_db(DB_PATH)
+    with encrypted_db(DB_PATH) as conn:
+        _ensure_schema(conn)
+        yield conn
 
 
 def _row(r) -> dict | None:
@@ -440,11 +444,9 @@ def _add_column(cursor, table: str, column: str, decl: str) -> None:
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
-def init_db() -> None:
-    _ensure_dirs()
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.executescript(
+def _ensure_schema(conn) -> None:
+    c = conn.cursor()
+    c.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -594,41 +596,47 @@ def init_db() -> None:
                 FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL
             );
             """
-        )
-        for key, value in DEFAULT_SETTINGS.items():
-            c.execute(
-                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-                (key, value),
-            )
-        existing_rates = c.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
-        if existing_rates == 0:
-            for name, category, unit, price, description, order in DEFAULT_RATES:
-                c.execute(
-                    """
-                    INSERT INTO rates (name, category, unit, price, description, is_active, sort_order)
-                    VALUES (?, ?, ?, ?, ?, 1, ?)
-                    """,
-                    (name, category, unit, price, description, order),
-                )
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(milestones)").fetchall()}
-        if "track" not in cols:
-            c.execute("ALTER TABLE milestones ADD COLUMN track TEXT")
-        _add_column(c, "students", "instructor_user_id", "INTEGER")
-        _add_column(c, "expenses", "owner_user_id", "INTEGER")
+    )
+    for key, value in DEFAULT_SETTINGS.items():
         c.execute(
-            """
-            UPDATE milestones
-            SET track = (
-                SELECT CASE
-                    WHEN students.goal = 'Flight Review' THEN 'Flight Review (BFR)'
-                    WHEN students.goal = 'IPC' THEN 'Instrument Proficiency Check (IPC)'
-                    ELSE COALESCE(students.goal, 'Other')
-                END
-                FROM students WHERE students.id = milestones.student_id
-            )
-            WHERE track IS NULL OR track = ''
-            """
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
         )
+    existing_rates = c.execute("SELECT COUNT(*) FROM rates").fetchone()[0]
+    if existing_rates == 0:
+        for name, category, unit, price, description, order in DEFAULT_RATES:
+            c.execute(
+                """
+                INSERT INTO rates (name, category, unit, price, description, is_active, sort_order)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                """,
+                (name, category, unit, price, description, order),
+            )
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(milestones)").fetchall()}
+    if "track" not in cols:
+        c.execute("ALTER TABLE milestones ADD COLUMN track TEXT")
+    _add_column(c, "students", "instructor_user_id", "INTEGER")
+    _add_column(c, "expenses", "owner_user_id", "INTEGER")
+    c.execute(
+        """
+        UPDATE milestones
+        SET track = (
+            SELECT CASE
+                WHEN students.goal = 'Flight Review' THEN 'Flight Review (BFR)'
+                WHEN students.goal = 'IPC' THEN 'Instrument Proficiency Check (IPC)'
+                ELSE COALESCE(students.goal, 'Other')
+            END
+            FROM students WHERE students.id = milestones.student_id
+        )
+        WHERE track IS NULL OR track = ''
+        """
+    )
+
+
+def init_db() -> None:
+    _ensure_dirs()
+    with get_conn() as _conn:
+        pass
     from aerobooks.store import encrypt_tree
 
     encrypt_tree(INVOICE_DIR)
@@ -921,6 +929,7 @@ def _attach_student_summary(student: dict) -> None:
 
 
 def save_student(data: dict) -> int:
+    init_db()
     now = iso_today()
     user = _current_user()
     fields = [

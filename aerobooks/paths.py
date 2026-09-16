@@ -33,6 +33,9 @@ def meipass() -> Path | None:
     return Path(raw) if raw else None
 
 
+_DATA_ROOT: Path | None = None
+
+
 def _writable_dir(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -45,9 +48,12 @@ def _writable_dir(path: Path) -> bool:
 
 
 def base_data_dir() -> Path:
+    global _DATA_ROOT
     override = os.environ.get("AEROBOOKS_DATA")
     if override:
         return Path(override)
+    if _DATA_ROOT is not None:
+        return _DATA_ROOT
     candidates: list[Path] = []
     # Streamlit Community Cloud mounts the repo at /mount/src as a bad place
     # for SQLite (read-only or no journal files). Keep books in a writable dir.
@@ -63,8 +69,10 @@ def base_data_dir() -> Path:
     candidates.append(install_dir() / "data")
     for path in candidates:
         if _writable_dir(path):
+            _DATA_ROOT = path
             return path
-    return candidates[-1]
+    _DATA_ROOT = candidates[-1]
+    return _DATA_ROOT
 
 
 def auth_db_path() -> Path:

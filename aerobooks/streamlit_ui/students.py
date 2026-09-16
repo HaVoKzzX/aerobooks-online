@@ -89,6 +89,13 @@ def _list(user: dict) -> None:
 
 @st.dialog("Student", width="large")
 def _student_dialog(user: dict, student: dict | None = None) -> None:
+    user = user or {}
+    if user.get("tenant_id"):
+        from aerobooks import auth, paths
+
+        auth.bind_user(user)
+        paths.bind_tenant(int(user["tenant_id"]))
+        db.init_db()
     data = dict(student or {})
     c1, c2 = st.columns(2)
     first = c1.text_input("First name", value=data.get("first_name") or "")
