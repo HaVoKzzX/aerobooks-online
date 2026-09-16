@@ -1,0 +1,17 @@
+AeroBooks — invoicing for Certified Flight Instructors
+
+The program will be installed to:
+
+  C:\Program Files\AeroBooks
+
+Your data (students, invoices, PDFs, settings) is stored separately in your Windows user folder:
+
+  %LOCALAPPDATA%\AeroBooks
+
+Backups you create go to:
+
+  Documents\AeroBooks Backups
+
+Uninstalling the program does not delete your data or backups.
+
+Python and all libraries are included. You do not need to install Python.
