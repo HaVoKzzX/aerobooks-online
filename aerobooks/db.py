@@ -481,6 +481,7 @@ def init_db() -> None:
                 aircraft_preference TEXT,
                 status TEXT NOT NULL DEFAULT 'active',
                 notes TEXT,
+                instructor_user_id INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -492,6 +493,7 @@ def init_db() -> None:
                 completed INTEGER NOT NULL DEFAULT 0,
                 completed_date TEXT,
                 sort_order INTEGER NOT NULL DEFAULT 0,
+                track TEXT,
                 FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
             );
 

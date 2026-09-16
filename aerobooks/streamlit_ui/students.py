@@ -175,7 +175,11 @@ def _student_dialog(user: dict, student: dict | None = None) -> None:
         }
         if instructor_id:
             payload["instructor_user_id"] = int(instructor_id)
-        sid = db.save_student(payload)
+        try:
+            sid = db.save_student(payload)
+        except Exception as err:
+            st.error(f"Could not save student: {err}")
+            return
         st.session_state.student_id = int(sid)
         st.session_state.pop("student_dialog", None)
         st.success("Student saved")

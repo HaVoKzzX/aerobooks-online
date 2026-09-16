@@ -1,4 +1,9 @@
-"""Encrypted SQLite connections and file I/O."""
+"""Encrypted SQLite connections and file I/O.
+
+Uses a real on-disk SQLite file (not :memory: deserialize). Streamlit Cloud
+cannot reliably journal an in-memory WAL snapshot, and cannot write SQLite
+into the cloned repo at /mount/src.
+"""
 
 from __future__ import annotations
 
@@ -39,52 +44,36 @@ def enc_path(path: Path) -> Path:
     return path.with_name(path.name + ".enc")
 
 
-def _read_sqlite_blob(path: Path) -> bytes:
+def _materialize_working_db(path: Path) -> None:
+    """Make sure path is a usable plaintext SQLite file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     encrypted = enc_path(path)
+    if path.exists() and path.stat().st_size and path.read_bytes()[:16].startswith(b"SQLite format 3"):
+        return
     if encrypted.exists():
-        return decrypt_bytes(encrypted.read_bytes())
-    if path.exists():
-        shm = Path(str(path) + "-shm")
-        if shm.exists():
-            try:
-                shm.unlink()
-            except OSError:
-                pass
-        try:
-            conn = sqlite3.connect(str(path))
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                conn.execute("PRAGMA journal_mode=DELETE")
-                conn.commit()
-                blob = conn.serialize()
-            finally:
-                conn.close()
-            return blob
-        except sqlite3.Error:
-            raw = path.read_bytes()
-            if raw.startswith(b"SQLite format 3"):
-                return raw
-            raise
-    return b""
+        raw = decrypt_bytes(encrypted.read_bytes())
+        tmp = path.with_suffix(path.suffix + ".load")
+        tmp.write_bytes(raw)
+        tmp.replace(path)
+        return
+    if path.exists() and is_encrypted(path.read_bytes()[:8] if path.stat().st_size else b""):
+        raw = decrypt_bytes(path.read_bytes())
+        path.write_bytes(raw)
 
 
-def _scrub_plaintext_sqlite(path: Path) -> None:
-    for leftover in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
-        if leftover.exists():
-            try:
-                leftover.unlink()
-            except OSError:
-                pass
-
-
-def _save_sqlite_blob(path: Path, blob: bytes) -> None:
-    dest = enc_path(path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    payload = encrypt_bytes(blob)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    tmp.write_bytes(payload)
-    tmp.replace(dest)
-    _scrub_plaintext_sqlite(path)
+def _read_sqlite_blob(path: Path) -> bytes:
+    _materialize_working_db(path)
+    path = Path(path)
+    if not path.exists():
+        return b""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.commit()
+        return conn.serialize() if hasattr(conn, "serialize") else path.read_bytes()
+    finally:
+        conn.close()
 
 
 def export_sqlite(path: Path) -> bytes:
@@ -93,13 +82,32 @@ def export_sqlite(path: Path) -> bytes:
     frames = getattr(_local, "frames", None) or {}
     if key in frames:
         frames[key].conn.commit()
-        return frames[key].conn.serialize()
-    return _read_sqlite_blob(Path(path))
+        conn = frames[key].conn
+        if hasattr(conn, "serialize"):
+            return conn.serialize()
+    _materialize_working_db(path)
+    p = Path(path)
+    return p.read_bytes() if p.exists() else b""
+
+
+def _persist_encrypted(path: Path) -> None:
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        payload = encrypt_bytes(path.read_bytes())
+        dest = enc_path(path)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_bytes(payload)
+        tmp.replace(dest)
+    except OSError:
+        pass
 
 
 @contextmanager
 def encrypted_db(path: Path):
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     key = str(path.resolve())
     frames = getattr(_local, "frames", None)
     if frames is None:
@@ -115,25 +123,30 @@ def encrypted_db(path: Path):
 
     lock = _path_lock(key)
     lock.acquire()
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    blob = _read_sqlite_blob(path)
-    if blob:
-        conn.deserialize(blob)
-    # Deserialized desktop DBs are often WAL; :memory: cannot use WAL.
-    conn.execute("PRAGMA journal_mode=MEMORY")
-    conn.execute("PRAGMA foreign_keys = ON")
-    frames[key] = _Frame(conn)
     try:
-        yield conn
-        conn.commit()
-        _save_sqlite_blob(path, conn.serialize())
-    except Exception:
-        conn.rollback()
-        raise
+        _materialize_working_db(path)
+        conn = sqlite3.connect(str(path), timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE")
+        except sqlite3.Error:
+            pass
+        frames[key] = _Frame(conn)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            frames.pop(key, None)
+            _persist_encrypted(path)
     finally:
-        conn.close()
-        frames.pop(key, None)
         lock.release()
 
 
